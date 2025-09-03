@@ -1,0 +1,5 @@
+import os
+
+class Config:
+    SERVER_URL = os.getenv("SERVER_URL", "http://127.0.0.1:8080/tkm8")
+    API_TOKEN = os.getenv("API_TOKEN", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIqNDM0MjZENzIzMjYxMzA1ODQzNEE1OTNEIiwidXNlcklkIjoiKjQzNDI2RDcyMzI2MTMwNTg0MzRBNTkzRCIsInBhc3N3b3JkIjoiKjczNTM0OTUxMzMzMjcxNzA2ODZDNzk0OTRDNkM0NTcyNjU0MjM0Nzk2QzY3M0QzRCIsImNvbXBhbnkiOiJTVUIiLCJleHAiOjIwMzUyMDEwMjZ9.r5jRQ9zjjYEwhJy_qvMpgCccuE2ckB4l57HfhcnEDpY")
