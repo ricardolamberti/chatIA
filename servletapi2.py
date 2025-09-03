@@ -2,7 +2,7 @@
 
 from flask import Flask, request, jsonify
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
-from b_backendjson import consulta,singleConsulta
+from b_backendjson import consulta, singleConsulta
 from b_backend import consultaSql
 import requests
 from config import Config
@@ -10,9 +10,36 @@ import json
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from sklearn.metrics.pairwise import cosine_similarity
 import traceback
+import os
+import time
+import base64
+import jwt
 
 import re
-app=Flask(__name__)
+app = Flask(__name__)
+
+
+def build_url(path: str) -> str:
+    return f"{Config.SERVER_URL.rstrip('/')}/{path.lstrip('/')}"
+
+
+def get_auth_header():
+    token = getattr(Config, "API_TOKEN", None)
+    if token:
+        return {"Authorization": f"Bearer {token.strip()}"}
+    secret_b64 = os.environ.get("JWT_SECRET_B64") or getattr(Config, "JWT_SECRET_B64", None)
+    if secret_b64:
+        try:
+            secret = base64.urlsafe_b64decode(secret_b64 + '=' * (-len(secret_b64) % 4))
+            now = int(time.time())
+            payload = {"sub": "service", "company": "SUB", "iat": now, "exp": now + 3600}
+            token = jwt.encode(payload, secret, algorithm="HS256")
+            if isinstance(token, bytes):
+                token = token.decode("utf-8")
+            return {"Authorization": f"Bearer {token}"}
+        except Exception:
+            return {}
+    return {}
 
 
 
@@ -475,12 +502,11 @@ def prepare_input_for_chatgpt(question, collected_data, actions_hierarchy, conte
 
 def consulta_api(api_url):
     """Consulta la API y devuelve la respuesta."""
-    headers = {
-        "Authorization": f"Bearer {Config.API_TOKEN}"
-    }
+    headers = {}
+    headers.update(get_auth_header())
 
     try:
-        response = requests.get(api_url, headers=headers)
+        response = requests.get(api_url, headers=headers, timeout=(5, 30))
         if response.status_code == 200:
             return response.json()
         elif response.status_code == 401:
@@ -524,7 +550,7 @@ query_cache = {}
 
 def get_info(user_name, object_name, vision, parametros, dictionary, filters=None):
     """Obtener información de un objeto con filtros específicos, con almacenamiento en caché."""
-    url = f"{Config.SERVER_URL}/rest/bot/getInfo"
+    url = build_url("/rest/bot/getInfo")
 
     # Verificación del formato de `filters`
     if not isinstance(filters, list) or not all(
@@ -559,14 +585,16 @@ def get_info(user_name, object_name, vision, parametros, dictionary, filters=Non
     print("Datos enviados en la solicitud (JSON):")
     print(json.dumps(data, indent=4))
 
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    headers.update(get_auth_header())
     response = requests.post(
         url,
         json=data,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Authorization": f"Bearer {Config.API_TOKEN}"
-        }
+        headers=headers,
+        timeout=(5, 30)
     )
 
     if response.status_code == 200:
