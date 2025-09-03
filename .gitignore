@@ -1,0 +1,17 @@
+# Archivos de entorno
+.env
+a_env_vars.py
+b_backend_google.py
+
+# Directorios ocultos (todos los que empiezan con punto, excepto los importantes)
+.*/
+!.git/
+!.gitignore
+!.gitattributes
+!.github/
+
+# Directorios que empiezan con __
+__*/
+
+# Directorio app
+/app/
