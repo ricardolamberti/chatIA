@@ -6,9 +6,26 @@ import jwt
 
 
 def _decode_secret() -> bytes:
+    """Resolve the base64-encoded JWT secret.
+
+    Priority:
+    1) ENV var `JWT_SECRET_B64`
+    2) `Config.API_TOKEN` (if available)
+    """
     secret_b64 = os.environ.get("JWT_SECRET_B64")
     if not secret_b64:
-        raise RuntimeError("JWT_SECRET_B64 environment variable not set")
+        # Fallback to Config.API_TOKEN if present
+        try:
+            from config import Config  # local import to avoid hard dependency
+            secret_b64 = getattr(Config, "API_TOKEN", None)
+        except Exception:
+            secret_b64 = None
+
+    if not secret_b64:
+        raise RuntimeError(
+            "JWT secret not configured. Set ENV JWT_SECRET_B64 or Config.API_TOKEN"
+        )
+
     secret_b64 += "=" * (-len(secret_b64) % 4)
     return base64.b64decode(secret_b64)
 

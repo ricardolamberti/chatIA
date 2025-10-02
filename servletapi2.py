@@ -2,44 +2,20 @@
 
 from flask import Flask, request, jsonify
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
-from b_backendjson import consulta, singleConsulta
+from b_backendjson import consulta,singleConsulta
 from b_backend import consultaSql
+import api_token
 import requests
 from config import Config
 import json
+from langchain_openai import ChatOpenAI
+import os
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from sklearn.metrics.pairwise import cosine_similarity
 import traceback
-import os
-import time
-import base64
-import jwt
 
 import re
-app = Flask(__name__)
-
-
-def build_url(path: str) -> str:
-    return f"{Config.SERVER_URL.rstrip('/')}/{path.lstrip('/')}"
-
-
-def get_auth_header():
-    token = getattr(Config, "API_TOKEN", None)
-    if token:
-        return {"Authorization": f"Bearer {token.strip()}"}
-    secret_b64 = os.environ.get("JWT_SECRET_B64") or getattr(Config, "JWT_SECRET_B64", None)
-    if secret_b64:
-        try:
-            secret = base64.urlsafe_b64decode(secret_b64 + '=' * (-len(secret_b64) % 4))
-            now = int(time.time())
-            payload = {"sub": "service", "company": "SUB", "iat": now, "exp": now + 3600}
-            token = jwt.encode(payload, secret, algorithm="HS256")
-            if isinstance(token, bytes):
-                token = token.decode("utf-8")
-            return {"Authorization": f"Bearer {token}"}
-        except Exception:
-            return {}
-    return {}
+app=Flask(__name__)
 
 
 
@@ -69,7 +45,17 @@ def request_gpt():
     response = consultaSql(user_id,question,company,clearHistory)
     return response
   
+@app.route("/request_chatgpt", methods=["POST"])
+def request_chatgpt():
+    # Obtener el ID del usuario y la pregunta del cuerpo de la solicitud
+    user_id = request.json.get("user_id")
+    question = request.json.get("question")
+    company = request.json.get("company")
+    clearHistory = request.json.get("clear_history")
 
+    response = singleConsulta(user_id,question,company,clearHistory)
+    return response
+  
 
 # Almacén de conversaciones en memoria
 conversations = {}
@@ -107,6 +93,8 @@ def response_question():
     """Responder una pregunta analizando con ChatGPT y consultando las APIs necesarias."""
     data = request.json
     user_id = data.get("user_id", "default")
+    company = data.get("company", "default")
+    business = data.get("business", "SITI")
     question = data.get("question")
     extraInfo = data.get("extrainfo")
     context = data.get("context", {})
@@ -133,7 +121,7 @@ def response_question():
 
         # Analizar inicialmente el objeto raíz
         analysis_result = analyze_question(
-            question, collected_data, object_name, user_name, vision, parametros, dictionary, user_id, context, [],extraInfo
+            question, collected_data, object_name, user_name,company, vision, parametros, dictionary, user_id, context, [],extraInfo
         )
         new_actions, new_objects, info = analysis_result
         actions_to_collect.extend(new_actions or [])
@@ -144,7 +132,7 @@ def response_question():
             cycle_count += 1
             # Recolectar información de acciones pendientes con los filtros específicos
             if actions_to_collect:
-                new_data = collect_information(user_name, actions_to_collect, vision, parametros, dictionary, [])
+                new_data = collect_information(user_name,company, actions_to_collect, vision, parametros, dictionary, [])
                 if not isinstance(new_data, dict):
                     print("Advertencia: 'collect_information' devolvió un valor inesperado.")
                     break
@@ -161,7 +149,7 @@ def response_question():
                     continue
 
                 # Obtener y recolectar datos del objeto actual con sus filtros
-                obj_data = collect_information(user_name, [obj_name], vision, parametros, dictionary, obj_filters)
+                obj_data = collect_information(user_name,company, [obj_name], vision, parametros, dictionary, obj_filters)
                 if not isinstance(obj_data, dict):
                     print(f"Advertencia: 'collect_information' devolvió un valor inesperado para el objeto '{obj_name}'.")
                     break
@@ -172,7 +160,7 @@ def response_question():
 
             # Reanalizar la pregunta con la información actualizada
             analysis_result = analyze_question(
-                question, collected_data, object_name, user_name, vision, parametros, dictionary, user_id, context, [], extraInfo
+                question, collected_data, object_name, user_name, company, vision, parametros, dictionary, user_id, context, [], extraInfo
             )
 
             if not analysis_result or not isinstance(analysis_result, tuple):
@@ -192,7 +180,7 @@ def response_question():
             print(f"Advertencia: 'info' no es un diccionario antes de la generación de la respuesta final.")
             info = {}
 
-        final_response = generate_final_response(user_id, question, collected_data, info, parametros)
+        final_response = generate_final_response(user_id, question, collected_data, info, parametros, business)
         if cycle_count >= max_cycles:
             final_response["note"] = "Respuesta generada con la información parcial disponible debido a un límite de ciclos alcanzado."
 
@@ -207,7 +195,7 @@ def response_question():
 
 
 
-def collect_information(user_name, actions_to_collect, vision, parametros, dictionary, filters):
+def collect_information(user_name, company,actions_to_collect, vision, parametros, dictionary, filters):
     """ETAPA 2: Ejecutar las acciones seleccionadas y recolectar la información, excluyendo los filtros del resultado."""
     collected_data = {}
 
@@ -219,7 +207,7 @@ def collect_information(user_name, actions_to_collect, vision, parametros, dicti
                 unique_action_key = f"{action_name}_{filter_str}" if filter_str else action_name
                 
                 # Obtener la información de acuerdo con los filtros
-                response_data = get_info(user_name, action_name, vision, parametros, dictionary, filters)
+                response_data = get_info(user_name,company, action_name, vision, parametros, dictionary, filters)
                 
                 # Excluir el campo 'filters' de la respuesta si existe
                 if isinstance(response_data, dict):
@@ -235,12 +223,13 @@ def collect_information(user_name, actions_to_collect, vision, parametros, dicti
     return collected_data
 
 
-def generate_final_response(user_id, question, collected_data, info, parametros):
+def generate_final_response(user_id, question, collected_data, info, parametros, business):
     """ETAPA 3: Generar la respuesta final a partir de la información recolectada, incluyendo datos de manuales adicionales."""
     
-    # Obtener contexto adicional del manual y ayuda
-    manual_context_manual = find_most_relevant_chunks(question, manual_chunks_siti, chunk_embeddings_siti)
-    manual_context_ayuda = find_most_relevant_chunks(question, manual_chunks_ayuda, chunk_embeddings_ayuda)
+    # Obtener contexto adicional del manual y ayuda según el business
+    manual_chunks, manual_embeddings, ayuda_chunks, ayuda_embeddings = get_business_manual_embeddings(business)
+    manual_context_manual = find_most_relevant_chunks(question, manual_chunks, manual_embeddings) if manual_embeddings else []
+    manual_context_ayuda = find_most_relevant_chunks(question, ayuda_chunks, ayuda_embeddings) if ayuda_embeddings else []
        
     # Filtrar 'filters' de los datos recolectados y de info anidado
     def remove_unwanted_keys(data, unwanted_keys=("filters", "actions")):
@@ -312,11 +301,11 @@ def extract_json_from_response(response_text):
         return {"actions_to_collect": [], "objects_to_explore": []}
 
 
-def analyze_question(question, collected_data, object_name, user_name, vision, parametros, dictionary, user_id, context, filters, extraInfo):
+def analyze_question(question, collected_data, object_name, user_name, company, vision, parametros, dictionary, user_id, context, filters, extraInfo):
     """ETAPA 1: Obtener estructura y determinar qué acciones ejecutar."""
     # Obtener la jerarquía de acciones, el mapa de acciones y datos recopilados
     actions_hierarchy, actions_map, collected_data_initial = get_actions_hierarchy(
-        user_name, object_name, vision, parametros, dictionary, filters
+        user_name,company, object_name, vision, parametros, dictionary, filters
     )
     
     # Agregar los datos iniciales recolectados a collected_data
@@ -368,9 +357,9 @@ def request_action_decision(user_id, input_usuario, extraInfo):
     # Extraer JSON con estructura { "actions_to_collect": [...], "objects_to_explore": [...] }
     return extract_json_from_response(action_decision_response.get("response", ""))
 
-def get_actions_hierarchy(user_name, object_name, vision, parametros, dictionary, filters):
+def get_actions_hierarchy(user_name, company, object_name, vision, parametros, dictionary, filters):
     """Obtener la jerarquía de acciones de un objeto y sus relaciones con filtros específicos."""
-    info = get_info(user_name, object_name, vision, parametros, dictionary, filters)
+    info = get_info(user_name, company, object_name, vision, parametros, dictionary, filters)
     actions_hierarchy = {
         "object": object_name,
         "actions": {},  
@@ -397,7 +386,7 @@ def get_actions_hierarchy(user_name, object_name, vision, parametros, dictionary
     # Procesar objetos relacionados y recolectar datos
     objects_childs = info.get("records", {})
     for related_object, relation_filters in objects_childs.items():
-        related_structure = get_info(user_name, related_object, "", parametros, dictionary, relation_filters)
+        related_structure = get_info(user_name, company, related_object, "", parametros, dictionary, relation_filters)
         
         if related_structure:
             # Mapeo de acciones del objeto relacionado en actions_map
@@ -500,13 +489,14 @@ def prepare_input_for_chatgpt(question, collected_data, actions_hierarchy, conte
 
 
 
-def consulta_api(api_url):
+def consulta_api(user_name,company,api_url):
     """Consulta la API y devuelve la respuesta."""
-    headers = {}
-    headers.update(get_auth_header())
+    headers = {
+            "Authorization": f"Bearer {api_token.generate_token(user_name,company)}"
+   }
 
     try:
-        response = requests.get(api_url, headers=headers, timeout=(5, 30))
+        response = requests.get(api_url, headers=headers)
         if response.status_code == 200:
             return response.json()
         elif response.status_code == 401:
@@ -548,9 +538,9 @@ import json
 # Diccionario global para almacenar caché de consultas
 query_cache = {}
 
-def get_info(user_name, object_name, vision, parametros, dictionary, filters=None):
+def get_info(user_name, company,object_name, vision, parametros, dictionary, filters=None):
     """Obtener información de un objeto con filtros específicos, con almacenamiento en caché."""
-    url = build_url("/rest/bot/getInfo")
+    url = f"{Config.SERVER_URL}/rest/bot/getInfo"
 
     # Verificación del formato de `filters`
     if not isinstance(filters, list) or not all(
@@ -585,16 +575,14 @@ def get_info(user_name, object_name, vision, parametros, dictionary, filters=Non
     print("Datos enviados en la solicitud (JSON):")
     print(json.dumps(data, indent=4))
 
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    headers.update(get_auth_header())
     response = requests.post(
         url,
         json=data,
-        headers=headers,
-        timeout=(5, 30)
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {api_token.generate_token(user_name,company)}"
+        }
     )
 
     if response.status_code == 200:
@@ -632,6 +620,40 @@ from tqdm import tqdm
 def load_manual_content(filepath):
     with open(filepath, 'r', encoding='ISO-8859-1') as file:
         return file.read()
+
+def get_business_manual_embeddings(business: str):
+    """Return manual/help chunks and embeddings for a given business.
+
+    Tries to use `<business>_manual.txt` and `<business>_ayuda.txt` with
+    per-business cached embeddings. Falls back to default `siti.txt` and
+    `ayuda.txt` precomputed values if business-specific files are missing.
+    """
+    manual_chunks = manual_embeddings = ayuda_chunks = ayuda_embeddings = []
+
+    try:
+        # Manual (knowledge) content
+        manual_path = f"{business}_manual.txt"
+        if business and os.path.exists(manual_path):
+            content = load_manual_content(manual_path)
+            pkl = f"{business}_manual_embeddings.pkl"
+            manual_chunks, manual_embeddings = get_or_generate_embeddings(pkl, content, split_manual_content)
+        else:
+            manual_chunks, manual_embeddings = manual_chunks_siti, chunk_embeddings_siti
+
+        # Ayuda (helpdesk) content
+        ayuda_path = f"{business}_ayuda.txt"
+        if business and os.path.exists(ayuda_path):
+            content = load_manual_content(ayuda_path)
+            pkl = f"{business}_ayuda_embeddings.pkl"
+            ayuda_chunks, ayuda_embeddings = get_or_generate_embeddings(pkl, content, split_manual_by_question_answer)
+        else:
+            ayuda_chunks, ayuda_embeddings = manual_chunks_ayuda, chunk_embeddings_ayuda
+    except Exception as e:
+        print(f"Fallo al cargar embeddings para business '{business}': {e}. Usando predeterminados.")
+        manual_chunks, manual_embeddings = manual_chunks_siti, chunk_embeddings_siti
+        ayuda_chunks, ayuda_embeddings = manual_chunks_ayuda, chunk_embeddings_ayuda
+
+    return manual_chunks, manual_embeddings, ayuda_chunks, ayuda_embeddings
 
 # Función para dividir 'ayuda.txt' en fragmentos de preguntas y respuestas
 def split_manual_by_question_answer(manual_content):
