@@ -1,22 +1,67 @@
 
 from flask import Flask, request, jsonify
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
+from logging.handlers import RotatingFileHandler
+import logging
+from pathlib import Path
+
 # 1. Cargar la bbdd con langchain
 from langchain_community.utilities import SQLDatabase
 from langchain_openai import ChatOpenAI
 from langchain_community.agent_toolkits import create_sql_agent
 from langchain_core.prompts import ChatPromptTemplate
 
+
+logger = logging.getLogger(__name__)
+
+
+def _configure_logging():
+    """Configura el sistema de logs para el módulo."""
+    if logger.handlers:
+        return
+
+    logger.setLevel(logging.INFO)
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
+    )
+
+    file_handler = RotatingFileHandler(
+        log_dir / "backend.log",
+        maxBytes=1_048_576,  # 1 MB
+        backupCount=5,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+
+
+_configure_logging()
+
 class MyQueryChecker:
     def check_query(self, query):
-        # Add your query checking and modification logic here
-        # For example, you might want to prevent any DELETE statements:
-      print('Check cadena: '+query)
-      if "DELETE" in query.upper():
-        raise ValueError("DELETE statements are not allowed")
-      if "TUR_PNR_BOLETO" in query.upper():
-        if ("COMPANY='TEST'" not in query.upper().trim()):
-          raise ValueError("No puede consultar otras companias")
+        """Valida y controla el acceso a las consultas SQL generadas."""
+        logger.debug("Verificando consulta generada: %s", query)
+
+        if "DELETE" in query.upper():
+            logger.error("Consulta bloqueada por intento de eliminación: %s", query)
+            raise ValueError("DELETE statements are not allowed")
+
+        if "TUR_PNR_BOLETO" in query.upper():
+            if "COMPANY='TEST'" not in query.upper().strip():
+                logger.error(
+                    "Consulta bloqueada por falta de filtro de compañía permitido: %s",
+                    query,
+                )
+                raise ValueError("No puede consultar otras companias")
+
+        logger.info("Consulta SQL verificada correctamente")
         return query
 
 # Create an instance of your query checker
@@ -88,31 +133,48 @@ def consultaSql(user_id,question,company,clearHistory):
     db= SQLDatabase.from_uri(pg_uri,include_tables=['tur_pnr_boleto', 'tur_carrier', 'tur_airport'])
     db_chain = ''#'#SQLDatabaseChain.from_llm(llm, db,use_query_checker=True, verbose=True)
  # qObtener o inicializar el historial de conversación para este usuario
-    if (clearHistory=='1'):
-        print("Borrando historico")
-        conversations[user_id] = []
-    else:
-        print("Mantener historico")
-     
-    conversation_history = conversations.get(user_id, [])
+    logger.info(
+        "Iniciando consulta SQL para user_id=%s, company=%s, reiniciar_historial=%s",
+        user_id,
+        company,
+        clearHistory,
+    )
 
-    # Generar una respuesta utilizando ChatGPT
-    input_text = ' '.join(conversation_history +  [question])
-    print(input_text)
-    consulta = formato.format(question = input_text, company = company)
-    system = formatoSys.format(company = company)
+    try:
+        if clearHistory == '1':
+            logger.info("Reinicio de historial de conversación solicitado")
+            conversations[user_id] = []
+        else:
+            logger.debug("Se conserva el historial de conversación existente")
 
-    prompt = ChatPromptTemplate.from_messages(
-      [("system", system), ("human", consulta)]
-    ).partial(dialect=db.dialect)
+        conversation_history = conversations.get(user_id, [])
 
+        # Generar una respuesta utilizando ChatGPT
+        input_text = ' '.join(conversation_history + [question])
+        logger.debug("Contexto de la conversación: %s", input_text)
 
-    # response = agent_executor.run(prompt)
-    response = db_chain.run(prompt)
-    
-    # Agregar la pregunta y la respuesta al historial de conversación
-    conversation_history.append(consulta)
-    conversation_history.append(response)
-    conversations[user_id] = conversation_history
+        consulta = formato.format(question=input_text, company=company)
+        system = formatoSys.format(company=company)
 
-    return jsonify({"question": question, "response": response})
+        prompt = ChatPromptTemplate.from_messages(
+            [("system", system), ("human", consulta)]
+        ).partial(dialect=db.dialect)
+
+        logger.info("Ejecutando cadena de base de datos")
+        # response = agent_executor.run(prompt)
+        response = db_chain.run(prompt)
+
+        # Agregar la pregunta y la respuesta al historial de conversación
+        conversation_history.append(consulta)
+        conversation_history.append(response)
+        conversations[user_id] = conversation_history
+
+        logger.info("Consulta completada correctamente para user_id=%s", user_id)
+        return jsonify({"question": question, "response": response})
+    except Exception as exc:
+        logger.exception("Error al procesar la consulta SQL para user_id=%s", user_id)
+        error_message = {
+            "error": "No se pudo procesar la solicitud.",
+            "details": str(exc),
+        }
+        return jsonify(error_message), 500
