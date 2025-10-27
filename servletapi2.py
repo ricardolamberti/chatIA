@@ -760,7 +760,9 @@ def find_most_relevant_chunks(question, manual_chunks, chunk_embeddings, top_n=1
 
 
 
-
+@app.get("/health")
+def health():
+    return {"status": "ok"}, 200
 
 if __name__ == "__main__":
     app.run(debug=True)
